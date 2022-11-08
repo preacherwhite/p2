@@ -94,6 +94,11 @@ type Raft struct {
 	electionTimer  *time.Timer
 	// vote communication variables
 	voteChannel chan bool
+	// handler communication
+	receivedRequestsChannel chan *RequestVoteArgs
+	receivedAppendChannel   chan *AppendEntriesArgs
+	resultRequestsChannel   chan *RequestVoteReply
+	resultAppendChannel     chan *AppendEntriesReply
 }
 
 //
@@ -151,69 +156,16 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.logger.Println("new request vote received")
-	requestCandidate := args.CandidateId
-	requestTerm := args.Term
-	rf.mux.Lock()
-	if requestTerm > rf.currentTerm {
-		rf.logger.Printf("term outdated, updating to %d \n", requestTerm)
-		rf.receivedNewTerm(requestTerm)
-		rf.votedFor = requestCandidate
-		reply.voteGranted = true
-		reply.Term = rf.currentTerm
-	} else if rf.state != "follower" || requestTerm < rf.currentTerm {
-		rf.logger.Println("discarding vote")
-		reply.voteGranted = false
-		reply.Term = rf.currentTerm
-	} else if rf.votedFor == -1 {
-		rf.logger.Println("voted")
-		rf.votedFor = requestCandidate
-		reply.voteGranted = true
-		reply.Term = rf.currentTerm
-	}
-	rf.mux.Unlock()
-
+	rf.receivedRequestsChannel <- args
+	reply = <-rf.resultRequestsChannel
+	return
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	//source := args.LeaderId
 	rf.logger.Println("new append received")
-	appendTerm := args.Term
-	rf.mux.Lock()
-	if appendTerm > rf.currentTerm {
-		rf.logger.Printf("term outdated, updating to %d \n", appendTerm)
-		rf.receivedNewTerm(appendTerm)
-		reply.success = true
-		reply.Term = rf.currentTerm
-	} else if rf.state == "leader" || appendTerm < rf.currentTerm {
-		rf.logger.Println("discarding append")
-		reply.success = false
-		reply.Term = rf.currentTerm
-	} else {
-		if rf.state == "candidate" {
-			rf.logger.Println("reverting candidate to follower")
-			rf.state = "follower"
-		}
-		rf.logger.Println("resetting election timer")
-		if !rf.electionTimer.Stop() {
-			<-rf.electionTimer.C
-		}
-		rf.electionTimer.Reset(rf.electionTimeoutWindow)
-		reply.success = true
-		reply.Term = rf.currentTerm
-	}
-	rf.mux.Unlock()
-}
-
-func (rf *Raft) receivedNewTerm(term int) {
-	if rf.state == "leader" {
-		rf.logger.Println("changing leader to follower")
-		if !rf.heartBeatTimer.Stop() {
-			<-rf.heartBeatTimer.C
-		}
-		rf.electionTimer.Reset(rf.electionTimeoutWindow)
-	}
-	rf.state = "follower"
-	rf.currentTerm = term
+	rf.receivedAppendChannel <- args
+	reply = <-rf.resultAppendChannel
 }
 
 //
@@ -375,7 +327,10 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf.beatInterval = 150
 	rf.state = "follower"
 	rf.voteChannel = make(chan bool, 500)
-
+	rf.receivedAppendChannel = make(chan *AppendEntriesArgs)
+	rf.receivedRequestsChannel = make(chan *RequestVoteArgs)
+	rf.resultRequestsChannel = make(chan *RequestVoteReply)
+	rf.resultAppendChannel = make(chan *AppendEntriesReply)
 	rf.electionTimer = time.NewTimer(rf.electionTimeoutWindow)
 
 	go rf.serverRoutine()
@@ -385,7 +340,6 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 
 func (rf *Raft) serverRoutine() {
 	for {
-		rf.logger.Println("server loop")
 		rf.mux.Lock()
 		if rf.state == "follower" {
 			rf.followerRoutine()
@@ -411,8 +365,41 @@ func (rf *Raft) followerRoutine() {
 			go rf.voteRequestRoutine(serverId)
 		}
 		rf.state = "candidate"
-	default:
-
+	case args := <-rf.receivedRequestsChannel:
+		requestCandidate := args.CandidateId
+		requestTerm := args.Term
+		reply := &RequestVoteReply{}
+		if requestTerm > rf.currentTerm {
+			rf.logger.Printf("term outdated, updating to %d \n", requestTerm)
+			rf.currentTerm = requestTerm
+		}
+		if requestTerm == rf.currentTerm && rf.votedFor == -1 {
+			rf.logger.Println("voted")
+			rf.votedFor = requestCandidate
+			reply.voteGranted = true
+		} else {
+			rf.logger.Println("discarding vote")
+			reply.voteGranted = false
+		}
+		reply.Term = rf.currentTerm
+		rf.resultRequestsChannel <- reply
+	case args := <-rf.resultAppendChannel:
+		appendTerm := args.Term
+		reply := &AppendEntriesReply{}
+		if appendTerm > rf.currentTerm {
+			rf.logger.Printf("term outdated, updating to %d \n", appendTerm)
+			rf.currentTerm = appendTerm
+		}
+		if appendTerm < rf.currentTerm {
+			rf.logger.Println("discarding append")
+			reply.success = false
+		} else {
+			rf.logger.Println("resetting election timer")
+			rf.resetElectionTimer()
+			reply.success = true
+		}
+		reply.Term = rf.currentTerm
+		rf.resultAppendChannel <- reply
 	}
 }
 
@@ -444,6 +431,33 @@ func (rf *Raft) leaderRoutine() {
 		for serverId := 0; serverId < len(rf.peers); serverId++ {
 			go rf.appendEntriesRoutine(serverId)
 		}
+	case args := <-rf.receivedRequestsChannel:
+		requestCandidate := args.CandidateId
+		requestTerm := args.Term
+		reply := &RequestVoteReply{}
+		if requestTerm > rf.currentTerm {
+			rf.leaderToFollower(requestTerm)
+			rf.votedFor = requestCandidate
+			reply.voteGranted = true
+		} else {
+			rf.logger.Println("discarding vote")
+			reply.voteGranted = false
+		}
+		reply.Term = rf.currentTerm
+		rf.resultRequestsChannel <- reply
+	case args := <-rf.resultAppendChannel:
+		appendTerm := args.Term
+		reply := &AppendEntriesReply{}
+		if appendTerm > rf.currentTerm {
+			rf.logger.Printf("term outdated, updating to %d \n", appendTerm)
+			rf.leaderToFollower(appendTerm)
+			reply.success = true
+		} else {
+			rf.logger.Println("discarding append")
+			reply.success = false
+		}
+		reply.Term = rf.currentTerm
+		rf.resultAppendChannel <- reply
 	}
 }
 
@@ -486,8 +500,36 @@ func (rf *Raft) candidateRoutine() {
 				<-rf.electionTimer.C
 			}
 		}
-	default:
-
+	case args := <-rf.receivedRequestsChannel:
+		requestCandidate := args.CandidateId
+		requestTerm := args.Term
+		reply := &RequestVoteReply{}
+		if requestTerm > rf.currentTerm {
+			rf.currentTerm = requestTerm
+			rf.votedFor = requestCandidate
+			rf.state = "follower"
+			reply.voteGranted = true
+		} else {
+			rf.logger.Println("discarding vote")
+			reply.voteGranted = false
+		}
+		reply.Term = rf.currentTerm
+		rf.resultRequestsChannel <- reply
+	case args := <-rf.resultAppendChannel:
+		appendTerm := args.Term
+		reply := &AppendEntriesReply{}
+		if appendTerm < rf.currentTerm {
+			rf.logger.Println("discarding append")
+			reply.success = false
+		} else {
+			rf.logger.Println("resetting election timer")
+			rf.state = "follower"
+			rf.currentTerm = appendTerm
+			rf.resetElectionTimer()
+			reply.success = true
+		}
+		reply.Term = rf.currentTerm
+		rf.resultAppendChannel <- reply
 	}
 }
 
@@ -498,4 +540,21 @@ func (rf *Raft) resetFollower(term int) {
 	rf.votedFor = -1
 	rf.currentTerm = term
 	//rf.resetElectionTimerChannel <- true
+}
+
+func (rf *Raft) leaderToFollower(term int) {
+	rf.logger.Printf("term outdated, updating to %d , reverting to follower\n", term)
+	rf.currentTerm = term
+	rf.state = "follower"
+	if !rf.heartBeatTimer.Stop() {
+		<-rf.heartBeatTimer.C
+	}
+	rf.electionTimer.Reset(rf.electionTimeoutWindow)
+}
+func (rf *Raft) resetElectionTimer() {
+	rf.logger.Println("resetting election timer")
+	if !rf.electionTimer.Stop() {
+		<-rf.electionTimer.C
+	}
+	rf.electionTimer.Reset(rf.electionTimeoutWindow)
 }

@@ -32,12 +32,13 @@ package raft
 
 import (
 	"fmt"
+	"github.com/cmu440/rpc"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
 	"sync"
-
-	"github.com/cmu440/rpc"
+	"time"
 )
 
 // Set to false to disable debug logs completely
@@ -45,7 +46,7 @@ import (
 const kEnableDebugLogs = true
 
 // Set to true to log to stdout instead of file
-const kLogToStdout = true
+const kLogToStdout = false
 
 // Change this to output logs to a different directory
 const kLogOutputDir = "./raftlogs/"
@@ -79,9 +80,20 @@ type Raft struct {
 	logger *log.Logger // We provide you with a separate logger per peer.
 
 	// Your data here (2A, 2B).
-	// Look at the Raft paper's Figure 2 for a description of what
-	// state a Raft peer should maintain
 
+	// Basic Raft variables that needs protection
+	currentTerm   int
+	votedFor      int
+	state         string
+	votesReceived int
+	// Basic Raft immutable variables
+	electionTimeoutWindow time.Duration
+	beatInterval          time.Duration
+	// Timer communication variables
+	heartBeatTimer *time.Timer
+	electionTimer  *time.Timer
+	// vote communication variables
+	voteChannel chan bool
 }
 
 //
@@ -92,40 +104,43 @@ type Raft struct {
 // believes it is the leader
 //
 func (rf *Raft) GetState() (int, int, bool) {
-	var me int
-	var term int
-	var isleader bool
-	// Your code here (2A)
-	return me, term, isleader
+	rf.mux.Lock()
+	me := rf.me
+	term := rf.currentTerm
+	isLeader := false
+	if rf.state == "leader" {
+		isLeader = true
+	}
+	rf.mux.Unlock()
+	return me, term, isLeader
 }
 
 //
 // RequestVoteArgs
 // ===============
-//
-// Example RequestVote RPC arguments structure
-//
-// Please note
-// ===========
-// Field names must start with capital letters!
-//
+
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B)
+	Term        int
+	CandidateId int
 }
 
 //
 // RequestVoteReply
 // ================
-//
-// Example RequestVote RPC reply structure.
-//
-// Please note
-// ===========
-// Field names must start with capital letters!
-//
-//
+
 type RequestVoteReply struct {
-	// Your data here (2A)
+	Term        int
+	voteGranted bool
+}
+
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	success bool
 }
 
 //
@@ -135,7 +150,70 @@ type RequestVoteReply struct {
 // Example RequestVote RPC handler
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (2A, 2B)
+	rf.logger.Println("new request vote received")
+	requestCandidate := args.CandidateId
+	requestTerm := args.Term
+	rf.mux.Lock()
+	if requestTerm > rf.currentTerm {
+		rf.logger.Printf("term outdated, updating to %d \n", requestTerm)
+		rf.receivedNewTerm(requestTerm)
+		rf.votedFor = requestCandidate
+		reply.voteGranted = true
+		reply.Term = rf.currentTerm
+	} else if rf.state != "follower" || requestTerm < rf.currentTerm {
+		rf.logger.Println("discarding vote")
+		reply.voteGranted = false
+		reply.Term = rf.currentTerm
+	} else if rf.votedFor == -1 {
+		rf.logger.Println("voted")
+		rf.votedFor = requestCandidate
+		reply.voteGranted = true
+		reply.Term = rf.currentTerm
+	}
+	rf.mux.Unlock()
+
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//source := args.LeaderId
+	rf.logger.Println("new append received")
+	appendTerm := args.Term
+	rf.mux.Lock()
+	if appendTerm > rf.currentTerm {
+		rf.logger.Printf("term outdated, updating to %d \n", appendTerm)
+		rf.receivedNewTerm(appendTerm)
+		reply.success = true
+		reply.Term = rf.currentTerm
+	} else if rf.state == "leader" || appendTerm < rf.currentTerm {
+		rf.logger.Println("discarding append")
+		reply.success = false
+		reply.Term = rf.currentTerm
+	} else {
+		if rf.state == "candidate" {
+			rf.logger.Println("reverting candidate to follower")
+			rf.state = "follower"
+		}
+		rf.logger.Println("resetting election timer")
+		if !rf.electionTimer.Stop() {
+			<-rf.electionTimer.C
+		}
+		rf.electionTimer.Reset(rf.electionTimeoutWindow)
+		reply.success = true
+		reply.Term = rf.currentTerm
+	}
+	rf.mux.Unlock()
+}
+
+func (rf *Raft) receivedNewTerm(term int) {
+	if rf.state == "leader" {
+		rf.logger.Println("changing leader to follower")
+		if !rf.heartBeatTimer.Stop() {
+			<-rf.heartBeatTimer.C
+		}
+		rf.electionTimer.Reset(rf.electionTimeoutWindow)
+	}
+	rf.state = "follower"
+	rf.currentTerm = term
 }
 
 //
@@ -183,7 +261,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // not the struct itself
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	rf.logger.Printf("sending vote request to server %d\n", server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	rf.logger.Printf("sending append to server %d\n", server)
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -260,7 +345,7 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
 	rf.me = me
-
+	rf.mux = sync.Mutex{}
 	if kEnableDebugLogs {
 		peerName := peers[me].String()
 		logPrefix := fmt.Sprintf("%s ", peerName)
@@ -283,6 +368,134 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	}
 
 	// Your initialization code here (2A, 2B)
+	rf.currentTerm = 0
+	rf.votedFor = -1
+	rf.votesReceived = 0
+	rf.electionTimeoutWindow = time.Duration(rand.Intn(200) + 800)
+	rf.beatInterval = 150
+	rf.state = "follower"
+	rf.voteChannel = make(chan bool, 500)
+
+	rf.electionTimer = time.NewTimer(rf.electionTimeoutWindow)
+
+	go rf.serverRoutine()
 
 	return rf
+}
+
+func (rf *Raft) serverRoutine() {
+	for {
+		rf.logger.Println("server loop")
+		rf.mux.Lock()
+		if rf.state == "follower" {
+			rf.followerRoutine()
+		} else if rf.state == "leader" {
+			rf.leaderRoutine()
+		} else {
+			rf.candidateRoutine()
+		}
+		rf.mux.Unlock()
+	}
+}
+
+func (rf *Raft) followerRoutine() {
+	rf.logger.Println("follower loop")
+	select {
+	case <-rf.electionTimer.C:
+		rf.logger.Println("election timeout, starting next election")
+		rf.currentTerm += 1
+		rf.votedFor = rf.me
+		rf.votesReceived = 0
+		rf.voteChannel = make(chan bool, 500)
+		for serverId := 0; serverId < len(rf.peers); serverId++ {
+			go rf.voteRequestRoutine(serverId)
+		}
+		rf.state = "candidate"
+	default:
+
+	}
+}
+
+func (rf *Raft) voteRequestRoutine(serverId int) {
+	newReply := &RequestVoteReply{}
+	newRequest := &RequestVoteArgs{
+		CandidateId: rf.me,
+		Term:        rf.currentTerm,
+	}
+	ok := rf.sendRequestVote(serverId, newRequest, newReply)
+	if ok {
+		if newReply.voteGranted {
+			rf.logger.Printf("vote received from server %d\n", serverId)
+			rf.voteChannel <- true
+		} else if rf.currentTerm < newReply.Term {
+			rf.logger.Printf("vote rejected from server %d, updating term and rollback to follower \n", serverId)
+			rf.mux.Lock()
+			rf.resetFollower(newReply.Term)
+			rf.mux.Unlock()
+		}
+	}
+
+}
+
+func (rf *Raft) leaderRoutine() {
+	rf.logger.Println("leader loop")
+	select {
+	case <-rf.heartBeatTimer.C:
+		for serverId := 0; serverId < len(rf.peers); serverId++ {
+			go rf.appendEntriesRoutine(serverId)
+		}
+	}
+}
+
+func (rf *Raft) appendEntriesRoutine(serverId int) {
+	newReply := &AppendEntriesReply{}
+	newAppend := &AppendEntriesArgs{
+		Term:     rf.currentTerm,
+		LeaderId: rf.me,
+	}
+
+	ok := rf.sendAppendEntries(serverId, newAppend, newReply)
+	rf.mux.Lock()
+	if ok {
+		if newReply.success {
+			rf.logger.Printf("append success from server %d\n", serverId)
+			//do nothing right now
+		} else if rf.currentTerm < newReply.Term {
+			rf.logger.Printf("append rejected from server %d, updating term and rollback to follower \n", serverId)
+			if !rf.heartBeatTimer.Stop() {
+				<-rf.heartBeatTimer.C
+			}
+			rf.resetFollower(newReply.Term)
+		}
+	}
+	rf.mux.Unlock()
+}
+
+func (rf *Raft) candidateRoutine() {
+	rf.logger.Println("candidate loop")
+	select {
+	case <-rf.voteChannel:
+		rf.votesReceived += 1
+		rf.logger.Printf("vote added, now %d votes\n", rf.votesReceived)
+		if rf.votesReceived > len(rf.peers)/2 {
+			rf.logger.Println("received enough votes, becoming leader")
+			rf.state = "leader"
+			rf.votedFor = -1
+			rf.heartBeatTimer = time.NewTimer(rf.beatInterval)
+			if !rf.electionTimer.Stop() {
+				<-rf.electionTimer.C
+			}
+		}
+	default:
+
+	}
+}
+
+func (rf *Raft) resetFollower(term int) {
+	rf.logger.Printf("resetting follower to term %d\n", term)
+	rf.state = "follower"
+	rf.votesReceived = 0
+	rf.votedFor = -1
+	rf.currentTerm = term
+	//rf.resetElectionTimerChannel <- true
 }

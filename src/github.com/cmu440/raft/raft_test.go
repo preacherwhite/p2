@@ -61,6 +61,158 @@ func TestReElection2A(t *testing.T) {
 	fmt.Printf("======================= END =======================\n\n")
 }
 
+func TestInitialElectionH2A(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2A): Initial election\n")
+
+	// is a leader elected?
+	fmt.Printf("Checking current leader\n")
+	cfg.checkOneLeader()
+	cfg.checkTerms()
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+func TestReConnect2A(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2A): Re-election\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+
+	// if the leader disconnects, a new one should be elected.
+	fmt.Printf("Disconnecting leader\n")
+	cfg.disconnect(leader1)
+
+	// a new leader should be elected
+	fmt.Printf("Checking for a new leader\n")
+	cfg.checkOneLeader()
+
+	cfg.connect(leader1)
+
+	fmt.Printf("Checking for leader\n")
+	cfg.checkOneLeader()
+	cfg.checkTerms()
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+func TestReConnectRobust2A(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2A): Re-election\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+
+	// if the leader disconnects, a new one should be elected.
+	fmt.Printf("Disconnecting leader\n")
+	cfg.disconnect(leader1)
+
+	// a new leader should be elected
+	fmt.Printf("Checking for a new leader\n")
+	leader2 := cfg.checkOneLeader()
+
+	cfg.connect(leader1)
+
+	fmt.Printf("Checking for leader\n")
+	cfg.checkOneLeader()
+	cfg.checkTerms()
+
+	cfg.disconnect(leader2)
+	cfg.disconnect(leader1)
+
+	time.Sleep(500 * time.Millisecond)
+
+	cfg.connect(leader1)
+	cfg.connect(leader2)
+	cfg.checkOneLeader()
+	for iters := 0; iters < 10; iters++ {
+		time.Sleep(500 * time.Millisecond)
+		cfg.checkTerms()
+	}
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+func TestElectionFail(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2A): Re-election\n")
+	fmt.Printf("Basic 1 leader\n")
+	leader1 := cfg.checkOneLeader()
+
+	// if the leader disconnects, a new one should be elected.
+	fmt.Printf("Disconnecting leader\n")
+	cfg.disconnect(leader1)
+
+	// a new leader should be elected
+	fmt.Printf("Checking for a new leader\n")
+	leader2 := cfg.checkOneLeader()
+
+	fmt.Printf("Disconnecting leader\n")
+	cfg.disconnect(leader2)
+
+	fmt.Printf("Checking for no new leader\n")
+	for iters := 0; iters < 10; iters++ {
+		time.Sleep(500 * time.Millisecond)
+		cfg.checkNoLeader()
+	}
+	fmt.Printf("======================= END =======================\n\n")
+}
+
+func Test5server(t *testing.T) {
+	fmt.Printf("==================== 3 SERVERS ====================\n")
+	servers := 5
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test 5 server\n")
+	fmt.Printf("Basic 1 leader\n")
+
+	leader1 := cfg.checkOneLeader()
+	partsize := 0
+	partition := make(IntSet)
+	partition0 := make(IntSet)
+	for i := 0; i < 5; i++ {
+		if i != leader1 {
+			if partsize < 3 {
+				fmt.Printf("sever %d in partition\n", i)
+				partition[i] = struct{}{}
+				partsize++
+			} else {
+				fmt.Printf("sever %d not in partition\n", i)
+				partition0[i] = struct{}{}
+			}
+		}
+	}
+	partition0[leader1] = struct{}{}
+	cfg.disconnect_partition(partition0)
+	time.Sleep(500 * time.Millisecond)
+	fmt.Printf("Checking for a new leader\n")
+	cfg.checkLeaderInPartition(partition)
+	fmt.Printf("reconnecting leader\n")
+	cfg.connect_partition(partition0)
+	cfg.checkOneLeader()
+	for iters := 0; iters < 10; iters++ {
+		time.Sleep(500 * time.Millisecond)
+		cfg.checkTerms()
+	}
+	fmt.Printf("======================= END =======================\n\n")
+}
+
 func TestBasicAgree2B(t *testing.T) {
 	fmt.Printf("==================== 5 SERVERS ====================\n")
 	servers := 5

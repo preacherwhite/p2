@@ -317,7 +317,7 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf.votedFor = -1
 	rf.votesReceived = 0
 	rf.electionTimeoutWindow = time.Duration(rand.Intn(1000) + 1000)
-	rf.beatInterval = 150
+	rf.beatInterval = 200
 	rf.state = "follower"
 	rf.voteChannel = make(chan bool)
 	rf.receivedAppendChannel = make(chan *AppendEntriesArgs)
@@ -371,7 +371,7 @@ func (rf *Raft) serverRoutine() {
 }
 
 func (rf *Raft) followerRoutine() {
-	rf.logger.Println("follower routine")
+	rf.logger.Printf("follower routine, term %d\n", rf.currentTerm)
 	select {
 	case <-rf.getCallChannel:
 		rf.getResultChannel <- &GetInfo{
@@ -391,6 +391,8 @@ func (rf *Raft) followerRoutine() {
 		if requestTerm > rf.currentTerm {
 			rf.logger.Printf("term outdated given new request, updating to %d \n", requestTerm)
 			rf.currentTerm = requestTerm
+			rf.votedFor = -1
+			rf.resetElectionTimer()
 		}
 		if requestTerm == rf.currentTerm && rf.votedFor == -1 {
 			rf.logger.Println("voted")
@@ -403,43 +405,42 @@ func (rf *Raft) followerRoutine() {
 		}
 		reply.Term = rf.currentTerm
 		rf.resultRequestsChannel <- reply
-	case args := <-rf.resultAppendChannel:
+	case args := <-rf.receivedAppendChannel:
 		appendTerm := args.Term
 		reply := &AppendEntriesReply{}
-		if appendTerm > rf.currentTerm {
+		if appendTerm >= rf.currentTerm {
 			rf.logger.Printf("term outdated given new append, updating to %d \n", appendTerm)
 			rf.currentTerm = appendTerm
-		}
-		if appendTerm < rf.currentTerm {
-			rf.logger.Println("discarding append")
-			reply.Success = false
-		} else {
-			rf.logger.Println("resetting election timer")
 			rf.resetElectionTimer()
 			reply.Success = true
+		} else if appendTerm < rf.currentTerm {
+			rf.logger.Println("discarding append")
+			reply.Success = false
 		}
 		reply.Term = rf.currentTerm
 		rf.resultAppendChannel <- reply
 	case args := <-rf.appendFeedbackChannel:
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
+			rf.votedFor = -1
 			rf.resetElectionTimer()
 		}
 	case args := <-rf.requestFeedbackChannel:
 		if args.Term > rf.currentTerm {
 			rf.currentTerm = args.Term
+			rf.votedFor = -1
 			rf.resetElectionTimer()
 		}
 
 	}
-	rf.logger.Println("follower routine end")
+	rf.logger.Printf("follower routine end\n\n")
 }
 
-func (rf *Raft) voteRequestRoutine(serverId int) {
+func (rf *Raft) voteRequestRoutine(serverId int, me int, currentTerm int) {
 	newReply := &RequestVoteReply{}
 	newRequest := &RequestVoteArgs{
-		CandidateId: rf.me,
-		Term:        rf.currentTerm,
+		CandidateId: me,
+		Term:        currentTerm,
 	}
 	ok := rf.sendRequestVote(serverId, newRequest, newReply)
 	if ok {
@@ -450,21 +451,24 @@ func (rf *Raft) voteRequestRoutine(serverId int) {
 }
 
 func (rf *Raft) leaderRoutine() {
-	rf.logger.Println("leader routine")
+	rf.logger.Printf("leader routine, term %d\n", rf.currentTerm)
 	select {
+	// get function call
 	case <-rf.getCallChannel:
 		rf.getResultChannel <- &GetInfo{
 			Me:       rf.me,
 			Term:     rf.currentTerm,
 			IsLeader: true,
 		}
+	// send heartbeat
 	case <-rf.heartBeatTimer.C:
 		for serverId := 0; serverId < len(rf.peers); serverId++ {
 			if serverId != rf.me {
-				go rf.appendEntriesRoutine(serverId)
+				go rf.appendEntriesRoutine(serverId, rf.me, rf.currentTerm)
 			}
 		}
 		rf.heartBeatTimer.Reset(rf.beatInterval * time.Millisecond)
+	// new request
 	case args := <-rf.receivedRequestsChannel:
 		rf.logger.Println("processing request")
 		requestCandidate := args.CandidateId
@@ -480,7 +484,8 @@ func (rf *Raft) leaderRoutine() {
 		}
 		reply.Term = rf.currentTerm
 		rf.resultRequestsChannel <- reply
-	case args := <-rf.resultAppendChannel:
+	// new append
+	case args := <-rf.receivedAppendChannel:
 		appendTerm := args.Term
 		reply := &AppendEntriesReply{}
 		if appendTerm > rf.currentTerm {
@@ -493,25 +498,26 @@ func (rf *Raft) leaderRoutine() {
 		}
 		reply.Term = rf.currentTerm
 		rf.resultAppendChannel <- reply
+	// append replied
 	case args := <-rf.appendFeedbackChannel:
 		if args.Term > rf.currentTerm {
 			rf.leaderToFollower(args.Term)
 		}
+	// request replied
 	case args := <-rf.requestFeedbackChannel:
 		if args.Term > rf.currentTerm {
 			rf.leaderToFollower(args.Term)
 		}
 	}
-	rf.logger.Println("leader routine end")
+	rf.logger.Printf("leader routine end\n\n")
 }
 
-func (rf *Raft) appendEntriesRoutine(serverId int) {
+func (rf *Raft) appendEntriesRoutine(serverId int, me int, currentTerm int) {
 	newReply := &AppendEntriesReply{}
 	newAppend := &AppendEntriesArgs{
-		Term:     rf.currentTerm,
-		LeaderId: rf.me,
+		Term:     currentTerm,
+		LeaderId: me,
 	}
-
 	ok := rf.sendAppendEntries(serverId, newAppend, newReply)
 	if ok {
 		rf.appendFeedbackChannel <- newReply
@@ -519,7 +525,7 @@ func (rf *Raft) appendEntriesRoutine(serverId int) {
 }
 
 func (rf *Raft) candidateRoutine() {
-	rf.logger.Println("candidate routine")
+	rf.logger.Printf("candidate routine, term %d\n", rf.currentTerm)
 	select {
 	case <-rf.getCallChannel:
 		rf.getResultChannel <- &GetInfo{
@@ -537,10 +543,8 @@ func (rf *Raft) candidateRoutine() {
 		reply := &RequestVoteReply{}
 		if requestTerm > rf.currentTerm {
 			rf.logger.Printf("term outdated given new request, updating to %d and voting\n", requestTerm)
-			rf.currentTerm = requestTerm
+			rf.candidateToFollower(args.Term)
 			rf.votedFor = requestCandidate
-			rf.state = "follower"
-			rf.votesReceived = 0
 			reply.VoteGranted = true
 			rf.resetElectionTimer()
 		} else {
@@ -549,7 +553,7 @@ func (rf *Raft) candidateRoutine() {
 		}
 		reply.Term = rf.currentTerm
 		rf.resultRequestsChannel <- reply
-	case args := <-rf.resultAppendChannel:
+	case args := <-rf.receivedAppendChannel:
 		appendTerm := args.Term
 		reply := &AppendEntriesReply{}
 		if appendTerm < rf.currentTerm {
@@ -557,19 +561,14 @@ func (rf *Raft) candidateRoutine() {
 			reply.Success = false
 		} else {
 			rf.logger.Println("resetting election timer")
-			rf.state = "follower"
-			rf.currentTerm = appendTerm
-			rf.resetElectionTimer()
+			rf.candidateToFollower(args.Term)
 			reply.Success = true
 		}
 		reply.Term = rf.currentTerm
 		rf.resultAppendChannel <- reply
 	case args := <-rf.appendFeedbackChannel:
 		if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.state = "follower"
-			rf.votesReceived = 0
-			rf.resetElectionTimer()
+			rf.candidateToFollower(args.Term)
 		}
 	case args := <-rf.requestFeedbackChannel:
 		if args.VoteGranted {
@@ -585,24 +584,31 @@ func (rf *Raft) candidateRoutine() {
 				rf.heartBeatTimer = time.NewTimer(rf.beatInterval * time.Millisecond)
 			}
 		} else if args.Term > rf.currentTerm {
-			rf.currentTerm = args.Term
-			rf.state = "follower"
-			rf.votesReceived = 0
-			rf.resetElectionTimer()
+			rf.candidateToFollower(args.Term)
 		}
 	}
-	//rf.logger.Println("candidate routine end")
+	rf.logger.Printf("candidate routine end\n\n")
 }
 
 func (rf *Raft) leaderToFollower(term int) {
 	rf.logger.Println("reverting leader to follower")
 	rf.currentTerm = term
 	rf.state = "follower"
+	rf.votedFor = -1
 	if !rf.heartBeatTimer.Stop() {
 		<-rf.heartBeatTimer.C
 	}
-	rf.electionTimer.Reset(rf.electionTimeoutWindow)
+	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
+
+func (rf *Raft) candidateToFollower(term int) {
+	rf.currentTerm = term
+	rf.state = "follower"
+	rf.votesReceived = 0
+	rf.votedFor = -1
+	rf.resetElectionTimer()
+}
+
 func (rf *Raft) resetElectionTimer() {
 	rf.logger.Println("resetting election timer")
 	if !rf.electionTimer.Stop() {
@@ -621,7 +627,7 @@ func (rf *Raft) electionSetup() {
 	}
 	for serverId := 0; serverId < len(rf.peers); serverId++ {
 		if serverId != rf.me {
-			go rf.voteRequestRoutine(serverId)
+			go rf.voteRequestRoutine(serverId, rf.me, rf.currentTerm)
 		}
 	}
 	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)

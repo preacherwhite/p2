@@ -127,6 +127,7 @@ type Raft struct {
 	// leader specific slices
 	nextIndex  []int
 	matchIndex []int
+	sentIndex  []int
 	// values for log tracking
 	commitIndex int
 	lastApplied int
@@ -175,8 +176,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term     int
+	Success  bool
+	serverId int
 }
 
 //
@@ -204,6 +206,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	replyValue := <-rf.resultAppendChannel
 	reply.Term = replyValue.Term
 	reply.Success = replyValue.Success
+	reply.serverId = replyValue.serverId
 	rf.logger.Printf("new append delivered from server %d, term %d \n", args.LeaderId, args.Term)
 }
 
@@ -354,6 +357,7 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf.applyCh = applyCh
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+	rf.sentIndex = make([]int, len(peers))
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.log = make([]*logInfo, 1)

@@ -85,12 +85,13 @@ func (rf *Raft) followerCaseReceiveAppend(args *AppendEntriesArgs) {
 		rf.logger.Printf("term outdated given new append, updating to %d \n", appendTerm)
 		rf.currentTerm = appendTerm
 		rf.resetElectionTimer()
-		reply.Success = true
+		reply.Success = false
 	} else if appendTerm < rf.currentTerm {
 		rf.logger.Println("discarding append")
 		reply.Success = false
 	}
 	reply.Term = rf.currentTerm
+	reply.serverId = rf.me
 	rf.resultAppendChannel <- reply
 }
 

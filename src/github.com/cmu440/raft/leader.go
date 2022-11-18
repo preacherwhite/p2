@@ -42,6 +42,12 @@ func (rf *Raft) leaderToFollower(term int) {
 	if !rf.heartBeatTimer.Stop() {
 		<-rf.heartBeatTimer.C
 	}
+	for i := 0; i < len(rf.matchIndex); i++ {
+		// zero out all leader specific variables
+		rf.matchIndex[i] = 0
+		rf.sentIndex[i] = 0
+		rf.nextIndex[i] = 0
+	}
 	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
 
@@ -75,6 +81,7 @@ func (rf *Raft) leaderCaseCheckFollower() {
 				entries:      rf.createEntries(rf.nextIndex[server], lastLogIndex),
 				leaderCommit: rf.commitIndex,
 			}
+			rf.sentIndex[server] = lastLogIndex
 			rf.appendEntriesRoutine(server, newAppendLog)
 		}
 
@@ -148,19 +155,30 @@ func (rf *Raft) leaderCaseReceiveAppend(args *AppendEntriesArgs) {
 	if appendTerm > rf.currentTerm {
 		rf.logger.Printf("term outdated, updating to %d \n", appendTerm)
 		rf.leaderToFollower(appendTerm)
-		reply.Success = true
+		reply.Success = false
 	} else {
 		rf.logger.Println("discarding append")
 		reply.Success = false
 	}
 	reply.Term = rf.currentTerm
+	reply.serverId = rf.me
 	rf.resultAppendChannel <- reply
 }
 
-func (rf *Raft) leaderCaseFeedbackAppend(args *AppendEntriesReply) {
-	if args.Term > rf.currentTerm {
-		rf.leaderToFollower(args.Term)
+func (rf *Raft) leaderCaseFeedbackAppend(reply *AppendEntriesReply) {
+	if reply.Term > rf.currentTerm {
+		rf.leaderToFollower(reply.Term)
 	}
+	server := reply.serverId
+	if reply.Success {
+		rf.matchIndex[server] = rf.sentIndex[server]
+		rf.nextIndex[server] = rf.sentIndex[server] + 1
+		rf.sentIndex[server] = 0
+	} else {
+		rf.nextIndex[server] -= 1
+		// TODO: design decision, don't retry here and leave it to next server loop
+	}
+
 }
 
 func (rf *Raft) leaderCaseFeedbackRequest(args *RequestVoteReply) {

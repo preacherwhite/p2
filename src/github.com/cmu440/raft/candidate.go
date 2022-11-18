@@ -81,9 +81,10 @@ func (rf *Raft) candidateCaseReceiveAppend(args *AppendEntriesArgs) {
 	} else {
 		rf.logger.Println("resetting election timer")
 		rf.candidateToFollower(args.Term)
-		reply.Success = true
+		reply.Success = false
 	}
 	reply.Term = rf.currentTerm
+	reply.serverId = rf.me
 	rf.resultAppendChannel <- reply
 }
 
@@ -125,6 +126,7 @@ func (rf *Raft) candidateToLeader() {
 	}
 	for i := 0; i < len(rf.matchIndex); i++ {
 		rf.matchIndex[i] = 0
+		rf.sentIndex[i] = 0
 	}
 	rf.heartBeatTimer = time.NewTimer(rf.beatInterval * time.Millisecond)
 }

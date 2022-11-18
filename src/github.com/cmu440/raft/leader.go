@@ -1,6 +1,8 @@
 package raft
 
-import "time"
+import (
+	"time"
+)
 
 func (rf *Raft) leaderRoutine() {
 	rf.logger.Printf("leader routine, term %d\n", rf.currentTerm)
@@ -9,6 +11,8 @@ func (rf *Raft) leaderRoutine() {
 	case <-rf.getCallChannel:
 		rf.leaderCaseGetState()
 	// send heartbeat
+	case args := <-rf.putCommandChannel:
+		rf.leaderCasePutCommand(args)
 	case <-rf.heartBeatTimer.C:
 		rf.leaderCaseHeartBeat()
 	// new request
@@ -23,6 +27,9 @@ func (rf *Raft) leaderRoutine() {
 	// request replied
 	case args := <-rf.requestFeedbackChannel:
 		rf.leaderCaseFeedbackRequest(args)
+	default:
+		rf.leaderCaseCheckFollower()
+		rf.leaderCaseCheckCommit()
 	}
 	rf.logger.Printf("leader routine end\n\n")
 }
@@ -38,12 +45,9 @@ func (rf *Raft) leaderToFollower(term int) {
 	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
 
-func (rf *Raft) appendEntriesRoutine(serverId int, me int, currentTerm int) {
+func (rf *Raft) appendEntriesRoutine(serverId int, newAppend *AppendEntriesArgs) {
 	newReply := &AppendEntriesReply{}
-	newAppend := &AppendEntriesArgs{
-		Term:     currentTerm,
-		LeaderId: me,
-	}
+
 	ok := rf.sendAppendEntries(serverId, newAppend, newReply)
 	if ok {
 		rf.appendFeedbackChannel <- newReply
@@ -58,10 +62,64 @@ func (rf *Raft) leaderCaseGetState() {
 	}
 }
 
+func (rf *Raft) leaderCaseCheckFollower() {
+	lastLogIndex := len(rf.log) - 1
+	for server := 0; server < len(rf.nextIndex); server++ {
+		if lastLogIndex >= rf.nextIndex[server] {
+			// server index outdated, sending logs
+			newAppendLog := &AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				prevLogIndex: rf.nextIndex[server] - 1,
+				prevLogTerm:  rf.log[rf.nextIndex[server]-1].term,
+				entries:      rf.createEntries(rf.nextIndex[server], lastLogIndex),
+				leaderCommit: rf.commitIndex,
+			}
+			rf.appendEntriesRoutine(server, newAppendLog)
+		}
+
+	}
+}
+
+func (rf *Raft) leaderCaseCheckCommit() {
+	N := rf.commitIndex + 1
+	for ; N < len(rf.log); N++ {
+		agreeCount := 0
+		for i := 0; i < len(rf.matchIndex); i++ {
+			if rf.matchIndex[i] >= N {
+				agreeCount += 1
+			}
+		}
+		if agreeCount <= len(rf.peers)/2 || rf.log[N].term != rf.currentTerm {
+			break
+		}
+	}
+	N -= 1
+	if N > rf.commitIndex {
+		rf.commitIndex = N
+	}
+}
+
+func (rf *Raft) leaderCasePutCommand(command interface{}) {
+	logEntry := &logInfo{
+		command: command,
+		term:    rf.currentTerm,
+	}
+	rf.log = append(rf.log, logEntry)
+}
+
 func (rf *Raft) leaderCaseHeartBeat() {
 	for serverId := 0; serverId < len(rf.peers); serverId++ {
 		if serverId != rf.me {
-			go rf.appendEntriesRoutine(serverId, rf.me, rf.currentTerm)
+			newAppend := &AppendEntriesArgs{
+				Term:         rf.currentTerm,
+				LeaderId:     rf.me,
+				prevLogIndex: -1,
+				prevLogTerm:  -1,
+				entries:      nil,
+				leaderCommit: rf.commitIndex,
+			}
+			go rf.appendEntriesRoutine(serverId, newAppend)
 		}
 	}
 	rf.heartBeatTimer.Reset(rf.beatInterval * time.Millisecond)
@@ -109,4 +167,14 @@ func (rf *Raft) leaderCaseFeedbackRequest(args *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.leaderToFollower(args.Term)
 	}
+}
+
+//start and end inclusive
+func (rf *Raft) createEntries(start int, end int) []interface{} {
+	entries := make([]interface{}, 0)
+	for i := start; i <= end; i++ {
+		entry := rf.log[i].command
+		entries = append(entries, entry)
+	}
+	return entries
 }

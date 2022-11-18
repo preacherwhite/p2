@@ -31,7 +31,26 @@ func (rf *Raft) candidateCaseGetState() {
 
 func (rf *Raft) candidateCaseElection() {
 	rf.logger.Println("election timeout, restarting election")
-	rf.electionSetup()
+	rf.currentTerm += 1
+	rf.votedFor = rf.me
+	rf.votesReceived = 1
+	// emptying the vote channel
+	select {
+	case <-rf.voteChannel:
+	default:
+	}
+	for serverId := 0; serverId < len(rf.peers); serverId++ {
+		if serverId != rf.me {
+			newRequest := &RequestVoteArgs{
+				CandidateId:  rf.me,
+				Term:         rf.currentTerm,
+				lastLogIndex: len(rf.log) - 1,
+				lastLogTerm:  rf.log[len(rf.log)-1].term,
+			}
+			go rf.voteRequestRoutine(serverId, newRequest)
+		}
+	}
+	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
 
 func (rf *Raft) candidateCaseReceiveRequest(args *RequestVoteArgs) {
@@ -79,13 +98,7 @@ func (rf *Raft) candidateCaseFeedbackRequest(args *RequestVoteReply) {
 		rf.logger.Printf("vote added, now %d votes\n", rf.votesReceived)
 		rf.votesReceived += 1
 		if rf.votesReceived > len(rf.peers)/2 {
-			rf.logger.Println("received enough votes, becoming leader")
-			rf.state = "leader"
-			rf.votedFor = -1
-			if !rf.electionTimer.Stop() {
-				<-rf.electionTimer.C
-			}
-			rf.heartBeatTimer = time.NewTimer(rf.beatInterval * time.Millisecond)
+			rf.candidateToLeader()
 		}
 	} else if args.Term > rf.currentTerm {
 		rf.candidateToFollower(args.Term)
@@ -98,4 +111,20 @@ func (rf *Raft) candidateToFollower(term int) {
 	rf.votesReceived = 0
 	rf.votedFor = -1
 	rf.resetElectionTimer()
+}
+
+func (rf *Raft) candidateToLeader() {
+	rf.logger.Println("received enough votes, becoming leader")
+	rf.state = "leader"
+	rf.votedFor = -1
+	if !rf.electionTimer.Stop() {
+		<-rf.electionTimer.C
+	}
+	for i := 0; i < len(rf.nextIndex); i++ {
+		rf.nextIndex[i] = len(rf.log)
+	}
+	for i := 0; i < len(rf.matchIndex); i++ {
+		rf.matchIndex[i] = 0
+	}
+	rf.heartBeatTimer = time.NewTimer(rf.beatInterval * time.Millisecond)
 }

@@ -70,6 +70,17 @@ type GetInfo struct {
 	IsLeader bool
 }
 
+type logInfo struct {
+	command interface{}
+	term    int
+}
+
+type putCommandFeedback struct {
+	index    int
+	term     int
+	isLeader bool
+}
+
 //
 // Raft struct
 // ===========
@@ -92,6 +103,7 @@ type Raft struct {
 	votedFor      int
 	state         string
 	votesReceived int
+	log           []*logInfo
 	// Basic Raft immutable variables
 	electionTimeoutWindow time.Duration
 	beatInterval          time.Duration
@@ -100,15 +112,24 @@ type Raft struct {
 	electionTimer  *time.Timer
 	// vote communication variables
 	voteChannel chan bool
-	// handler communication
-	receivedRequestsChannel chan *RequestVoteArgs
-	receivedAppendChannel   chan *AppendEntriesArgs
-	resultRequestsChannel   chan *RequestVoteReply
-	resultAppendChannel     chan *AppendEntriesReply
-	requestFeedbackChannel  chan *RequestVoteReply
-	appendFeedbackChannel   chan *AppendEntriesReply
-	getCallChannel          chan bool
-	getResultChannel        chan *GetInfo
+	// channels
+	receivedRequestsChannel   chan *RequestVoteArgs
+	receivedAppendChannel     chan *AppendEntriesArgs
+	resultRequestsChannel     chan *RequestVoteReply
+	resultAppendChannel       chan *AppendEntriesReply
+	requestFeedbackChannel    chan *RequestVoteReply
+	appendFeedbackChannel     chan *AppendEntriesReply
+	getCallChannel            chan bool
+	getResultChannel          chan *GetInfo
+	applyCh                   chan ApplyCommand
+	putCommandChannel         chan interface{}
+	putCommandFeedbackChannel chan *putCommandFeedback
+	// leader specific slices
+	nextIndex  []int
+	matchIndex []int
+	// values for log tracking
+	commitIndex int
+	lastApplied int
 }
 
 //
@@ -129,8 +150,10 @@ func (rf *Raft) GetState() (int, int, bool) {
 // ===============
 
 type RequestVoteArgs struct {
-	Term        int
-	CandidateId int
+	Term         int
+	CandidateId  int
+	lastLogIndex int
+	lastLogTerm  int
 }
 
 //
@@ -143,8 +166,12 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-	Term     int
-	LeaderId int
+	Term         int
+	LeaderId     int
+	prevLogIndex int
+	prevLogTerm  int
+	entries      []interface{}
+	leaderCommit int
 }
 
 type AppendEntriesReply struct {
@@ -261,13 +288,9 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader
 //
 func (rf *Raft) PutCommand(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B)
-
-	return index, term, isLeader
+	rf.putCommandChannel <- command
+	reply := <-rf.putCommandFeedbackChannel
+	return reply.index, reply.term, reply.isLeader
 }
 
 //
@@ -328,6 +351,18 @@ func NewPeer(peers []*rpc.ClientEnd, me int, applyCh chan ApplyCommand) *Raft {
 	rf.appendFeedbackChannel = make(chan *AppendEntriesReply)
 	rf.getResultChannel = make(chan *GetInfo)
 	rf.getCallChannel = make(chan bool)
+	rf.applyCh = applyCh
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	rf.log = make([]*logInfo, 1)
+	// insert dummy into 0 index
+	rf.log[0] = &logInfo{
+		command: nil,
+		term:    -1,
+	}
+
 	if kEnableDebugLogs {
 		peerName := peers[me].String()
 		logPrefix := fmt.Sprintf("%s ", peerName)

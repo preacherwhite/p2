@@ -91,11 +91,11 @@ func (rf *Raft) followerCaseReceiveAppend(args *AppendEntriesArgs) {
 		reply.Success = false
 	}
 	reply.Term = rf.currentTerm
-	reply.serverId = rf.me
 	rf.resultAppendChannel <- reply
 }
 
-func (rf *Raft) followerCaseFeedbackAppend(args *AppendEntriesReply) {
+func (rf *Raft) followerCaseFeedbackAppend(feedback *appendFeedback) {
+	args := feedback.reply
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1

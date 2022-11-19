@@ -4,6 +4,12 @@ import (
 	"time"
 )
 
+type appendFeedback struct {
+	reply         *AppendEntriesReply
+	serverId      int
+	lastSentIndex int
+}
+
 func (rf *Raft) leaderRoutine() {
 	rf.logger.Printf("leader routine, term %d\n", rf.currentTerm)
 	select {
@@ -30,6 +36,7 @@ func (rf *Raft) leaderRoutine() {
 	default:
 		rf.leaderCaseCheckFollower()
 		rf.leaderCaseCheckCommit()
+		rf.leaderCaseCheckApply()
 	}
 	rf.logger.Printf("leader routine end\n\n")
 }
@@ -45,18 +52,21 @@ func (rf *Raft) leaderToFollower(term int) {
 	for i := 0; i < len(rf.matchIndex); i++ {
 		// zero out all leader specific variables
 		rf.matchIndex[i] = 0
-		rf.sentIndex[i] = 0
 		rf.nextIndex[i] = 0
 	}
 	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
 
-func (rf *Raft) appendEntriesRoutine(serverId int, newAppend *AppendEntriesArgs) {
+func (rf *Raft) appendEntriesRoutine(serverId int, newAppend *AppendEntriesArgs, lastSentIndex int) {
 	newReply := &AppendEntriesReply{}
 
 	ok := rf.sendAppendEntries(serverId, newAppend, newReply)
 	if ok {
-		rf.appendFeedbackChannel <- newReply
+		rf.appendFeedbackChannel <- &appendFeedback{
+			reply:         newReply,
+			serverId:      serverId,
+			lastSentIndex: lastSentIndex,
+		}
 	}
 }
 
@@ -81,8 +91,7 @@ func (rf *Raft) leaderCaseCheckFollower() {
 				entries:      rf.createEntries(rf.nextIndex[server], lastLogIndex),
 				leaderCommit: rf.commitIndex,
 			}
-			rf.sentIndex[server] = lastLogIndex
-			rf.appendEntriesRoutine(server, newAppendLog)
+			rf.appendEntriesRoutine(server, newAppendLog, lastLogIndex)
 		}
 
 	}
@@ -107,12 +116,29 @@ func (rf *Raft) leaderCaseCheckCommit() {
 	}
 }
 
+func (rf *Raft) leaderCaseCheckApply() {
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied += 1
+		newApply := ApplyCommand{
+			Index:   rf.lastApplied,
+			Command: rf.log[rf.lastApplied].command,
+		}
+		rf.applyCh <- newApply
+	}
+}
+
 func (rf *Raft) leaderCasePutCommand(command interface{}) {
 	logEntry := &logInfo{
 		command: command,
 		term:    rf.currentTerm,
 	}
 	rf.log = append(rf.log, logEntry)
+	putFeedback := &putCommandFeedback{
+		index:    len(rf.log) - 1,
+		term:     rf.currentTerm,
+		isLeader: true,
+	}
+	rf.putCommandFeedbackChannel <- putFeedback
 }
 
 func (rf *Raft) leaderCaseHeartBeat() {
@@ -126,7 +152,7 @@ func (rf *Raft) leaderCaseHeartBeat() {
 				entries:      nil,
 				leaderCommit: rf.commitIndex,
 			}
-			go rf.appendEntriesRoutine(serverId, newAppend)
+			go rf.appendEntriesRoutine(serverId, newAppend, 0)
 		}
 	}
 	rf.heartBeatTimer.Reset(rf.beatInterval * time.Millisecond)
@@ -161,19 +187,24 @@ func (rf *Raft) leaderCaseReceiveAppend(args *AppendEntriesArgs) {
 		reply.Success = false
 	}
 	reply.Term = rf.currentTerm
-	reply.serverId = rf.me
 	rf.resultAppendChannel <- reply
 }
 
-func (rf *Raft) leaderCaseFeedbackAppend(reply *AppendEntriesReply) {
+func (rf *Raft) leaderCaseFeedbackAppend(feedback *appendFeedback) {
+	reply := feedback.reply
+	server := feedback.serverId
 	if reply.Term > rf.currentTerm {
 		rf.leaderToFollower(reply.Term)
 	}
-	server := reply.serverId
+
+	if feedback.lastSentIndex == 0 {
+		// heartbeat
+		return
+	}
+
 	if reply.Success {
-		rf.matchIndex[server] = rf.sentIndex[server]
-		rf.nextIndex[server] = rf.sentIndex[server] + 1
-		rf.sentIndex[server] = 0
+		rf.matchIndex[server] = feedback.lastSentIndex
+		rf.nextIndex[server] = feedback.lastSentIndex + 1
 	} else {
 		rf.nextIndex[server] -= 1
 		// TODO: design decision, don't retry here and leave it to next server loop

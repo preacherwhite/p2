@@ -84,11 +84,11 @@ func (rf *Raft) candidateCaseReceiveAppend(args *AppendEntriesArgs) {
 		reply.Success = false
 	}
 	reply.Term = rf.currentTerm
-	reply.serverId = rf.me
 	rf.resultAppendChannel <- reply
 }
 
-func (rf *Raft) candidateCaseFeedbackAppend(args *AppendEntriesReply) {
+func (rf *Raft) candidateCaseFeedbackAppend(feedback *appendFeedback) {
+	args := feedback.reply
 	if args.Term > rf.currentTerm {
 		rf.candidateToFollower(args.Term)
 	}
@@ -126,7 +126,6 @@ func (rf *Raft) candidateToLeader() {
 	}
 	for i := 0; i < len(rf.matchIndex); i++ {
 		rf.matchIndex[i] = 0
-		rf.sentIndex[i] = 0
 	}
 	rf.heartBeatTimer = time.NewTimer(rf.beatInterval * time.Millisecond)
 }

@@ -9,6 +9,8 @@ func (rf *Raft) candidateRoutine() {
 		rf.candidateCaseGetState()
 	case <-rf.electionTimer.C:
 		rf.candidateCaseElection()
+	case args := <-rf.putCommandChannel:
+		rf.casePutCommand(args)
 	case args := <-rf.receivedRequestsChannel:
 		rf.candidateCaseReceiveRequest(args)
 	case args := <-rf.receivedAppendChannel:
@@ -17,6 +19,8 @@ func (rf *Raft) candidateRoutine() {
 		rf.candidateCaseFeedbackAppend(args)
 	case args := <-rf.requestFeedbackChannel:
 		rf.candidateCaseFeedbackRequest(args)
+	default:
+		rf.checkApply()
 	}
 	rf.logger.Printf("candidate routine end\n\n")
 }
@@ -75,16 +79,38 @@ func (rf *Raft) candidateCaseReceiveRequest(args *RequestVoteArgs) {
 func (rf *Raft) candidateCaseReceiveAppend(args *AppendEntriesArgs) {
 	appendTerm := args.Term
 	reply := &AppendEntriesReply{}
-	if appendTerm < rf.currentTerm {
+
+	if appendTerm >= rf.currentTerm {
+		rf.logger.Printf("term outdated given new append, updating to %d \n", appendTerm)
+		rf.currentTerm = appendTerm
+		rf.candidateToFollower(args.Term)
+	}
+	if appendTerm < rf.currentTerm || len(rf.log) <= args.prevLogIndex || rf.log[args.prevLogIndex].term != args.prevLogTerm {
 		rf.logger.Println("discarding append")
 		reply.Success = false
-	} else {
-		rf.logger.Println("resetting election timer")
-		rf.candidateToFollower(args.Term)
-		reply.Success = false
+		reply.Term = rf.currentTerm
+		rf.resultAppendChannel <- reply
+		return
 	}
-	reply.Term = rf.currentTerm
-	rf.resultAppendChannel <- reply
+	// get rid of all entries beyond prevLogIndex and append new entries
+	rf.log = rf.log[:args.prevLogIndex+1]
+	for entry := range args.entries {
+		newLog := &logInfo{
+			command: entry,
+			term:    rf.currentTerm,
+		}
+		rf.log = append(rf.log, newLog)
+	}
+	// update commit index
+	if args.leaderCommit > rf.commitIndex {
+		if len(rf.log)-1 < args.leaderCommit {
+			rf.commitIndex = len(rf.log) - 1
+		} else {
+			rf.commitIndex = args.leaderCommit
+		}
+	}
+	// reset timer
+	rf.resetElectionTimer()
 }
 
 func (rf *Raft) candidateCaseFeedbackAppend(feedback *appendFeedback) {

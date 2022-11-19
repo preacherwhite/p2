@@ -1,6 +1,8 @@
 package raft
 
-import "time"
+import (
+	"time"
+)
 
 func (rf *Raft) followerRoutine() {
 	rf.logger.Printf("follower routine, term %d\n", rf.currentTerm)
@@ -9,6 +11,8 @@ func (rf *Raft) followerRoutine() {
 		rf.followerCaseGetState()
 	case <-rf.electionTimer.C:
 		rf.followerCaseElection()
+	case args := <-rf.putCommandChannel:
+		rf.casePutCommand(args)
 	case args := <-rf.receivedRequestsChannel:
 		rf.followerCaseReceiveRequest(args)
 	case args := <-rf.receivedAppendChannel:
@@ -17,6 +21,8 @@ func (rf *Raft) followerRoutine() {
 		rf.followerCaseFeedbackAppend(args)
 	case args := <-rf.requestFeedbackChannel:
 		rf.followerCaseFeedbackRequest(args)
+	default:
+		rf.checkApply()
 	}
 	rf.logger.Printf("follower routine end\n\n")
 }
@@ -81,17 +87,36 @@ func (rf *Raft) followerCaseReceiveRequest(args *RequestVoteArgs) {
 func (rf *Raft) followerCaseReceiveAppend(args *AppendEntriesArgs) {
 	appendTerm := args.Term
 	reply := &AppendEntriesReply{}
-	if appendTerm >= rf.currentTerm {
+	if appendTerm > rf.currentTerm {
 		rf.logger.Printf("term outdated given new append, updating to %d \n", appendTerm)
 		rf.currentTerm = appendTerm
-		rf.resetElectionTimer()
-		reply.Success = false
-	} else if appendTerm < rf.currentTerm {
+	}
+	if appendTerm < rf.currentTerm || len(rf.log) <= args.prevLogIndex || rf.log[args.prevLogIndex].term != args.prevLogTerm {
 		rf.logger.Println("discarding append")
 		reply.Success = false
+		reply.Term = rf.currentTerm
+		rf.resultAppendChannel <- reply
+		return
 	}
-	reply.Term = rf.currentTerm
-	rf.resultAppendChannel <- reply
+	// get rid of all entries beyond prevLogIndex and append new entries
+	rf.log = rf.log[:args.prevLogIndex+1]
+	for entry := range args.entries {
+		newLog := &logInfo{
+			command: entry,
+			term:    rf.currentTerm,
+		}
+		rf.log = append(rf.log, newLog)
+	}
+	// update commit index
+	if args.leaderCommit > rf.commitIndex {
+		if len(rf.log)-1 < args.leaderCommit {
+			rf.commitIndex = len(rf.log) - 1
+		} else {
+			rf.commitIndex = args.leaderCommit
+		}
+	}
+	// reset timer
+	rf.resetElectionTimer()
 }
 
 func (rf *Raft) followerCaseFeedbackAppend(feedback *appendFeedback) {

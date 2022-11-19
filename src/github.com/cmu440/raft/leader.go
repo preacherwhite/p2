@@ -18,7 +18,7 @@ func (rf *Raft) leaderRoutine() {
 		rf.leaderCaseGetState()
 	// send heartbeat
 	case args := <-rf.putCommandChannel:
-		rf.leaderCasePutCommand(args)
+		rf.casePutCommand(args)
 	case <-rf.heartBeatTimer.C:
 		rf.leaderCaseHeartBeat()
 	// new request
@@ -36,7 +36,7 @@ func (rf *Raft) leaderRoutine() {
 	default:
 		rf.leaderCaseCheckFollower()
 		rf.leaderCaseCheckCommit()
-		rf.leaderCaseCheckApply()
+		rf.checkApply()
 	}
 	rf.logger.Printf("leader routine end\n\n")
 }
@@ -114,31 +114,6 @@ func (rf *Raft) leaderCaseCheckCommit() {
 	if N > rf.commitIndex {
 		rf.commitIndex = N
 	}
-}
-
-func (rf *Raft) leaderCaseCheckApply() {
-	for rf.lastApplied < rf.commitIndex {
-		rf.lastApplied += 1
-		newApply := ApplyCommand{
-			Index:   rf.lastApplied,
-			Command: rf.log[rf.lastApplied].command,
-		}
-		rf.applyCh <- newApply
-	}
-}
-
-func (rf *Raft) leaderCasePutCommand(command interface{}) {
-	logEntry := &logInfo{
-		command: command,
-		term:    rf.currentTerm,
-	}
-	rf.log = append(rf.log, logEntry)
-	putFeedback := &putCommandFeedback{
-		index:    len(rf.log) - 1,
-		term:     rf.currentTerm,
-		isLeader: true,
-	}
-	rf.putCommandFeedbackChannel <- putFeedback
 }
 
 func (rf *Raft) leaderCaseHeartBeat() {

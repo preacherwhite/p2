@@ -412,3 +412,30 @@ func (rf *Raft) resetElectionTimer() {
 	}
 	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
+
+func (rf *Raft) checkApply() {
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied += 1
+		newApply := ApplyCommand{
+			Index:   rf.lastApplied,
+			Command: rf.log[rf.lastApplied].command,
+		}
+		rf.applyCh <- newApply
+	}
+}
+
+func (rf *Raft) casePutCommand(command interface{}) {
+	logEntry := &logInfo{
+		command: command,
+		term:    rf.currentTerm,
+	}
+	putFeedback := &putCommandFeedback{
+		index:    len(rf.log) - 1,
+		term:     rf.currentTerm,
+		isLeader: rf.state == "leader",
+	}
+	if rf.state == "leader" {
+		rf.log = append(rf.log, logEntry)
+	}
+	rf.putCommandFeedbackChannel <- putFeedback
+}

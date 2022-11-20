@@ -4,12 +4,19 @@ import (
 	"time"
 )
 
+// appendFeedback
+// struct that stores extra info needed for handling returned append to other servers
+//
 type appendFeedback struct {
 	reply         *AppendEntriesReply
 	serverId      int
 	lastSentIndex int
 }
 
+// leaderRoutine
+// =====
+// routine for leader, cased on each different channel signals, runs checkApply and leaderCaseCheckCommit on default
+//
 func (rf *Raft) leaderRoutine() {
 	select {
 	// get function call
@@ -39,6 +46,10 @@ func (rf *Raft) leaderRoutine() {
 	}
 }
 
+// leaderToFollower
+// =====
+// change leader to follower
+//
 func (rf *Raft) leaderToFollower(term int) {
 	rf.logger.Println("reverting leader to follower")
 	rf.currentTerm = term
@@ -55,6 +66,10 @@ func (rf *Raft) leaderToFollower(term int) {
 	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
 
+// appendEntriesRoutine
+// =====
+// routine for appending entries, sends requests to others
+//
 func (rf *Raft) appendEntriesRoutine(serverId int, newAppend *AppendEntriesArgs, lastSentIndex int) {
 	newReply := &AppendEntriesReply{}
 
@@ -68,6 +83,10 @@ func (rf *Raft) appendEntriesRoutine(serverId int, newAppend *AppendEntriesArgs,
 	}
 }
 
+// leaderCaseGetState
+// =====
+// returns self information
+//
 func (rf *Raft) leaderCaseGetState() {
 	rf.getResultChannel <- &GetInfo{
 		Me:       rf.me,
@@ -76,6 +95,10 @@ func (rf *Raft) leaderCaseGetState() {
 	}
 }
 
+// leaderCaseCheckFollower
+// =====
+// checks if any follower can be updated with new entries
+//
 func (rf *Raft) leaderCaseCheckFollower() {
 	lastLogIndex := len(rf.log) - 1
 	for server := 0; server < len(rf.nextIndex); server++ {
@@ -97,6 +120,10 @@ func (rf *Raft) leaderCaseCheckFollower() {
 	}
 }
 
+// leaderCaseCheckCommit
+// =====
+// checks agreement is made and update commit index
+//
 func (rf *Raft) leaderCaseCheckCommit() {
 	resultN := rf.commitIndex
 	for N := rf.commitIndex + 1; N < len(rf.log); N++ {
@@ -120,23 +147,33 @@ func (rf *Raft) leaderCaseCheckCommit() {
 	}
 }
 
+// leaderCaseHeartBeat
+// =====
+// sends heartbeat to servers if needed
+//
 func (rf *Raft) leaderCaseHeartBeat() {
 	for serverId := 0; serverId < len(rf.peers); serverId++ {
 		if serverId != rf.me {
-			newAppend := &AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: rf.nextIndex[serverId] - 1,
-				PrevLogTerm:  rf.log[rf.nextIndex[serverId]-1].Term,
-				Entries:      nil,
-				LeaderCommit: rf.commitIndex,
+			if rf.nextIndex[serverId] >= len(rf.log) {
+				newAppend := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[serverId] - 1,
+					PrevLogTerm:  rf.log[rf.nextIndex[serverId]-1].Term,
+					Entries:      nil,
+					LeaderCommit: rf.commitIndex,
+				}
+				go rf.appendEntriesRoutine(serverId, newAppend, 0)
 			}
-			go rf.appendEntriesRoutine(serverId, newAppend, 0)
 		}
 	}
 	rf.heartBeatTimer.Reset(rf.beatInterval * time.Millisecond)
 }
 
+// leaderCaseReceiveRequest
+// =====
+// processes vote requests, only relevant if term outdated
+//
 func (rf *Raft) leaderCaseReceiveRequest(args *RequestVoteArgs) {
 	rf.logger.Println("processing request")
 	requestCandidate := args.CandidateId
@@ -158,6 +195,10 @@ func (rf *Raft) leaderCaseReceiveRequest(args *RequestVoteArgs) {
 	rf.resultRequestsChannel <- reply
 }
 
+// leaderCaseReceiveAppend
+// =====
+// processes append requests, only relevant if term outdated
+//
 func (rf *Raft) leaderCaseReceiveAppend(args *AppendEntriesArgs) {
 	rf.logger.Println("(leader) received new append")
 	appendTerm := args.Term
@@ -174,8 +215,11 @@ func (rf *Raft) leaderCaseReceiveAppend(args *AppendEntriesArgs) {
 	rf.resultAppendChannel <- reply
 }
 
+// leaderCaseFeedbackAppend
+// =====
+// processes resulted appends, decides what to do with server based on success or failure
+//
 func (rf *Raft) leaderCaseFeedbackAppend(feedback *appendFeedback) {
-	//rf.logger.Println("append feedback")
 	reply := feedback.reply
 	server := feedback.serverId
 	if reply.Term > rf.currentTerm {
@@ -184,7 +228,7 @@ func (rf *Raft) leaderCaseFeedbackAppend(feedback *appendFeedback) {
 	}
 
 	if feedback.lastSentIndex == 0 {
-		//rf.logger.Println("heartbeat feedback")
+		// heartbeat
 		return
 	}
 
@@ -195,24 +239,16 @@ func (rf *Raft) leaderCaseFeedbackAppend(feedback *appendFeedback) {
 	} else {
 		rf.logger.Printf("append not successful, updating nextindex to %d", rf.nextIndex[server]-1)
 		rf.nextIndex[server] -= 1
-		// TODO: design decision, don't retry here and leave it to next server loop
 	}
 
 }
 
+// leaderCaseFeedbackRequest
+// =====
+// processes previous vote results, not relevant unless term outdated
+//
 func (rf *Raft) leaderCaseFeedbackRequest(args *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.leaderToFollower(args.Term)
 	}
 }
-
-//start and end inclusive
-//func (rf *Raft) createEntries(start int, end int) []interface{} {
-//	entries := make([]interface{}, 0)
-//	for i := start; i <= end; i++ {
-//		entry := rf.log[i].Command
-//		entries = append(entries, entry)
-//		rf.logger.Printf("creating entry with entry %v \n", entry.(int))
-//	}
-//	return entries
-//}

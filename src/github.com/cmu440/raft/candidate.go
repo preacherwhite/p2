@@ -2,6 +2,10 @@ package raft
 
 import "time"
 
+// candidateRoutine
+// =====
+// routine for candidateRoutine, cased on each different channel signals, runs checkApply on default
+//
 func (rf *Raft) candidateRoutine() {
 	select {
 	case <-rf.getCallChannel:
@@ -23,6 +27,10 @@ func (rf *Raft) candidateRoutine() {
 	}
 }
 
+// candidateCaseGetState
+// =====
+// returns self information
+//
 func (rf *Raft) candidateCaseGetState() {
 	rf.getResultChannel <- &GetInfo{
 		Me:       rf.me,
@@ -31,6 +39,10 @@ func (rf *Raft) candidateCaseGetState() {
 	}
 }
 
+// candidateCaseElection
+// =====
+// restarts election after election timeout
+//
 func (rf *Raft) candidateCaseElection() {
 	rf.logger.Println("election timeout, restarting election")
 	rf.currentTerm += 1
@@ -55,6 +67,10 @@ func (rf *Raft) candidateCaseElection() {
 	rf.electionTimer.Reset(rf.electionTimeoutWindow * time.Millisecond)
 }
 
+// candidateCaseReceiveRequest
+// =====
+// processes vote requests from other candidates, only valid if term outdated
+//
 func (rf *Raft) candidateCaseReceiveRequest(args *RequestVoteArgs) {
 	rf.logger.Println("processing request")
 	requestCandidate := args.CandidateId
@@ -78,6 +94,11 @@ func (rf *Raft) candidateCaseReceiveRequest(args *RequestVoteArgs) {
 	rf.resultRequestsChannel <- reply
 }
 
+// candidateCaseReceiveAppend
+// =====
+// processes append requests, calls on processAppend, also checks if term need updating.
+// If append valid then turns back to follower
+//
 func (rf *Raft) candidateCaseReceiveAppend(args *AppendEntriesArgs) {
 	appendTerm := args.Term
 	if appendTerm > rf.currentTerm {
@@ -94,6 +115,10 @@ func (rf *Raft) candidateCaseReceiveAppend(args *AppendEntriesArgs) {
 	rf.resultAppendChannel <- rf.processAppend(args)
 }
 
+// candidateCaseFeedbackAppend
+// =====
+// previous append's result, only relevant if term needs updating
+//
 func (rf *Raft) candidateCaseFeedbackAppend(feedback *appendFeedback) {
 	args := feedback.reply
 	if args.Term > rf.currentTerm {
@@ -101,6 +126,10 @@ func (rf *Raft) candidateCaseFeedbackAppend(feedback *appendFeedback) {
 	}
 }
 
+// candidateCaseFeedbackRequest
+// =====
+// previous request's result, updates into leader if successful with majority
+//
 func (rf *Raft) candidateCaseFeedbackRequest(args *RequestVoteReply) {
 	if args.VoteGranted {
 		rf.logger.Printf("vote added, now %d votes\n", rf.votesReceived)
@@ -113,6 +142,10 @@ func (rf *Raft) candidateCaseFeedbackRequest(args *RequestVoteReply) {
 	}
 }
 
+// candidateToFollower
+// =====
+// turns candidate to follower
+//
 func (rf *Raft) candidateToFollower(term int) {
 	rf.currentTerm = term
 	rf.state = "follower"
@@ -121,6 +154,10 @@ func (rf *Raft) candidateToFollower(term int) {
 	rf.resetElectionTimer()
 }
 
+// candidateToLeader
+// =====
+// promotes into leader
+//
 func (rf *Raft) candidateToLeader() {
 	rf.logger.Println("received enough votes, becoming leader")
 	rf.state = "leader"

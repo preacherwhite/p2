@@ -4,6 +4,10 @@ import (
 	"time"
 )
 
+// followerRoutine
+// =====
+// routine for follower, cased on each different channel signals, runs checkApply on default
+//
 func (rf *Raft) followerRoutine() {
 	select {
 	case <-rf.getCallChannel:
@@ -25,6 +29,10 @@ func (rf *Raft) followerRoutine() {
 	}
 }
 
+// followerCaseGetState
+// =====
+// returns self information
+//
 func (rf *Raft) followerCaseGetState() {
 	rf.getResultChannel <- &GetInfo{
 		Me:       rf.me,
@@ -33,6 +41,10 @@ func (rf *Raft) followerCaseGetState() {
 	}
 }
 
+// followerCaseElection
+// =====
+// starts off election after election timeout, turn into candidate
+//
 func (rf *Raft) followerCaseElection() {
 	rf.logger.Println("election timeout, starting next election")
 	rf.currentTerm += 1
@@ -58,6 +70,10 @@ func (rf *Raft) followerCaseElection() {
 	rf.state = "candidate"
 }
 
+// followerCaseReceiveRequest
+// =====
+// processes vote requests from other candidates, checks validation based on paper
+//
 func (rf *Raft) followerCaseReceiveRequest(args *RequestVoteArgs) {
 	rf.logger.Println("processing request")
 	requestCandidate := args.CandidateId
@@ -67,7 +83,6 @@ func (rf *Raft) followerCaseReceiveRequest(args *RequestVoteArgs) {
 		rf.logger.Printf("Term outdated given new request, updating to %d \n", requestTerm)
 		rf.currentTerm = requestTerm
 		rf.votedFor = -1
-		rf.resetElectionTimer()
 	}
 
 	if requestTerm < rf.currentTerm {
@@ -97,6 +112,10 @@ func (rf *Raft) followerCaseReceiveRequest(args *RequestVoteArgs) {
 	rf.resultRequestsChannel <- reply
 }
 
+// followerCaseReceiveAppend
+// =====
+// processes append requests, calls on processAppend, also checks if term need updating
+//
 func (rf *Raft) followerCaseReceiveAppend(args *AppendEntriesArgs) {
 	//rf.logger.Printf("processing append, Term %d, leader %d, previdx %d, prevterm %d, entry len %d\n",
 	//	args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
@@ -108,6 +127,10 @@ func (rf *Raft) followerCaseReceiveAppend(args *AppendEntriesArgs) {
 	rf.resultAppendChannel <- rf.processAppend(args)
 }
 
+// followerCaseFeedbackAppend
+// =====
+// previous append's result, only relevant if term needs updating
+//
 func (rf *Raft) followerCaseFeedbackAppend(feedback *appendFeedback) {
 	args := feedback.reply
 	if args.Term > rf.currentTerm {
@@ -117,6 +140,10 @@ func (rf *Raft) followerCaseFeedbackAppend(feedback *appendFeedback) {
 	}
 }
 
+// followerCaseFeedbackRequest
+// =====
+// previous request's result, only relevant if term needs updating
+//
 func (rf *Raft) followerCaseFeedbackRequest(args *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
@@ -125,6 +152,10 @@ func (rf *Raft) followerCaseFeedbackRequest(args *RequestVoteReply) {
 	}
 }
 
+// voteRequestRoutine
+// =====
+// routine for voting, sends requests to others
+//
 func (rf *Raft) voteRequestRoutine(serverId int, newRequest *RequestVoteArgs) {
 	newReply := &RequestVoteReply{}
 	ok := rf.sendRequestVote(serverId, newRequest, newReply)

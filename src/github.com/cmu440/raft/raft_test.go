@@ -271,6 +271,66 @@ func TestFailAgree2B(t *testing.T) {
 	fmt.Printf("======================= END =======================\n\n")
 }
 
+func TestFailAgreeHidden2B(t *testing.T) {
+	fmt.Printf("==================== 5 SERVERS ====================\n")
+	servers := 5
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2B): agreement despite \nfollower disconnection\n")
+
+	cfg.one(101, servers)
+
+	// follower network disconnection
+	fmt.Printf("Checking one leader\n")
+	leader := cfg.checkOneLeader()
+	cfg.disconnect((leader + 1) % servers)
+
+	fmt.Printf("Checking agreement with one disconnected peer %d\n", (leader+1)%servers)
+	// agree despite two disconnected servers?
+	cfg.one(102, servers-1)
+	cfg.one(103, servers-1)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(104, servers-1)
+	cfg.one(105, servers-1)
+
+	cfg.disconnect((leader + 2) % servers)
+
+	fmt.Printf("Checking agreement with two disconnected peer%d\n", (leader+2)%servers)
+	// agree despite two disconnected servers?
+	cfg.one(106, servers-2)
+	cfg.one(107, servers-2)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(108, servers-2)
+	cfg.one(109, servers-2)
+
+	// re-connect
+	fmt.Printf("Reconnecting one peer\n")
+	cfg.connect((leader + 1) % servers)
+	fmt.Printf("Checking with one reconnected server\n")
+	// agree with full set of servers?
+	cfg.one(110, servers-1)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(111, servers-1)
+
+	fmt.Printf("Reconnecting second peer, disconnecting first peer\n")
+	cfg.disconnect((leader + 1) % servers)
+	cfg.connect((leader + 2) % servers)
+	fmt.Printf("Checking with one reconnected server\n")
+	// agree with full set of servers?
+	cfg.one(112, servers-1)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(113, servers-1)
+
+	fmt.Printf("Checking with all reconnected server\n")
+	cfg.connect((leader + 1) % servers)
+	cfg.one(114, servers)
+	time.Sleep(RaftElectionTimeout)
+	cfg.one(115, servers)
+
+	fmt.Printf("======================= END =======================\n\n")
+}
+
 func TestFailNoAgree2B(t *testing.T) {
 	fmt.Printf("==================== 5 SERVERS ====================\n")
 	servers := 5
@@ -438,6 +498,44 @@ func TestRejoinHidden2B(t *testing.T) {
 	defer cfg.cleanup()
 
 	fmt.Printf("Test (2B): rejoin of partitioned leader\n")
+	fmt.Printf("Checking agreement\n")
+	cfg.one(10, servers)
+
+	leader1 := cfg.checkOneLeader()
+	fmt.Printf("Disconnectiong leader %d\n", leader1)
+	cfg.disconnect(leader1)
+
+	fmt.Printf("Sending 3 commands to disconnected leader\n")
+	for i := 0; i < 3; i++ {
+		index, _, ok := cfg.rafts[leader1].PutCommand(20 + i)
+		if !ok {
+			t.Fatalf("Leader rejected PutCommand()")
+		}
+		if index != 2+i {
+			t.Fatalf("Expected index %d, got %v", 2+i, index)
+		}
+	}
+	fmt.Printf("Checking agreement for new leader\n")
+	cfg.one(30, servers-1)
+	leader2 := cfg.checkOneLeader()
+
+	fmt.Printf("Disconnection new leader %d\n", leader2)
+	cfg.disconnect(leader2)
+
+	fmt.Printf("Connecting first disconnected leader\n")
+	cfg.connect(leader1)
+
+	fmt.Printf("Checking agreement\n")
+	cfg.one(40, servers-1)
+}
+
+func TestPartitionRejoinHidden2B(t *testing.T) {
+	fmt.Printf("==================== 5 SERVERS ====================\n")
+	servers := 3
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Hidden Test (2B): more strict check on rejoin of partitioned nodes\n")
 	fmt.Printf("Checking agreement\n")
 	cfg.one(10, servers)
 

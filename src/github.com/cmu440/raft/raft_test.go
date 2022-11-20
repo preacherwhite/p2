@@ -227,7 +227,7 @@ func TestBasicAgree2B(t *testing.T) {
 		if nd > 0 {
 			t.Fatalf("Some have committed before PutCommand()")
 		}
-
+		fmt.Printf("putting Command\n")
 		xindex := cfg.one(index*100, servers)
 		if xindex != index {
 			t.Fatalf("Got index %v but expected %v", xindex, index)
@@ -376,7 +376,7 @@ loop:
 
 		for j := 0; j < servers; j++ {
 			if _, t, _ := cfg.rafts[j].GetState(); t != term {
-				// term changed -- can't expect low RPC counts
+				// Term changed -- can't expect low RPC counts
 				continue loop
 			}
 		}
@@ -431,6 +431,43 @@ loop:
 
 	fmt.Printf("======================= END =======================\n\n")
 }
+func TestRejoinHidden2B(t *testing.T) {
+	fmt.Printf("==================== 5 SERVERS ====================\n")
+	servers := 5
+	cfg := make_config(t, servers, false)
+	defer cfg.cleanup()
+
+	fmt.Printf("Test (2B): rejoin of partitioned leader\n")
+	fmt.Printf("Checking agreement\n")
+	cfg.one(10, servers)
+
+	leader1 := cfg.checkOneLeader()
+	fmt.Printf("Disconnectiong leader %d\n", leader1)
+	cfg.disconnect(leader1)
+
+	fmt.Printf("Sending 3 commands to disconnected leader\n")
+	for i := 0; i < 3; i++ {
+		index, _, ok := cfg.rafts[leader1].PutCommand(20 + i)
+		if !ok {
+			t.Fatalf("Leader rejected PutCommand()")
+		}
+		if index != 2+i {
+			t.Fatalf("Expected index %d, got %v", 2+i, index)
+		}
+	}
+	fmt.Printf("Checking agreement for new leader\n")
+	cfg.one(30, servers-1)
+	leader2 := cfg.checkOneLeader()
+
+	fmt.Printf("Disconnection new leader %d\n", leader2)
+	cfg.disconnect(leader2)
+
+	fmt.Printf("Connecting first disconnected leader\n")
+	cfg.connect(leader1)
+
+	fmt.Printf("Checking agreement\n")
+	cfg.one(40, servers-1)
+}
 
 //
 // Support for Raft tester
@@ -457,7 +494,7 @@ type config struct {
 	applyErr  []string      // from apply channel readers
 	connected []bool        // whether each server is on the net
 	endnames  [][]string    // the port file names each sends to
-	logs      []map[int]int // copy of each server's committed entries
+	logs      []map[int]int // copy of each server's committed Entries
 }
 
 var ncpu_once sync.Once
@@ -564,7 +601,7 @@ func (cfg *config) start1(i int) {
 					err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.Index)
 				}
 			} else {
-				err_msg = fmt.Sprintf("committed command %v is not an int", m.Command)
+				err_msg = fmt.Sprintf("committed Command %v is not an int", m.Command)
 			}
 
 			if err_msg != "" {
@@ -714,7 +751,7 @@ func (cfg *config) checkOneLeader() int {
 		lastTermWithLeader := -1
 		for t, leaders := range leaders {
 			if len(leaders) > 1 {
-				cfg.t.Fatalf("term %d has %d (>1) leaders", t, len(leaders))
+				cfg.t.Fatalf("Term %d has %d (>1) leaders", t, len(leaders))
 			}
 			if t > lastTermWithLeader {
 				lastTermWithLeader = t
@@ -743,7 +780,7 @@ func (cfg *config) checkLeaderInPartition(partition IntSet) int {
 		lastTermWithLeader := -1
 		for t, leaderset := range leaders {
 			if len(leaderset) > 1 {
-				cfg.t.Fatalf("a partition in term %d has %d (>1) leaders", t, len(leaderset))
+				cfg.t.Fatalf("a partition in Term %d has %d (>1) leaders", t, len(leaderset))
 			}
 			if t > lastTermWithLeader {
 				lastTermWithLeader = t
@@ -758,7 +795,7 @@ func (cfg *config) checkLeaderInPartition(partition IntSet) int {
 	return -1
 }
 
-// check that everyone agrees on the term.
+// check that everyone agrees on the Term.
 func (cfg *config) checkTerms() int {
 	term := -1
 	for i := 0; i < cfg.n; i++ {
@@ -767,7 +804,7 @@ func (cfg *config) checkTerms() int {
 			if term == -1 {
 				term = xterm
 			} else if term != xterm {
-				cfg.t.Fatalf("servers disagree on term")
+				cfg.t.Fatalf("servers disagree on Term")
 			}
 		}
 	}
@@ -865,6 +902,7 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 	starts := 0
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
+		//fmt.Printf("finding leader \n")
 		index := -1
 		for si := 0; si < cfg.n; si++ {
 
@@ -886,14 +924,15 @@ func (cfg *config) one(cmd int, expectedServers int) int {
 
 		if index != -1 {
 			// somebody claimed to be the leader and to have
-			// submitted our command; wait a while for agreement.
+			// submitted our Command; wait a while for agreement.
+			//fmt.Printf("leader found \n")
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
-						// and it was the command we submitted.
+						// and it was the Command we submitted.
 						return index
 					}
 				}

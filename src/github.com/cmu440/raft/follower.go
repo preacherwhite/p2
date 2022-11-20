@@ -5,7 +5,6 @@ import (
 )
 
 func (rf *Raft) followerRoutine() {
-	rf.logger.Printf("follower routine, term %d\n", rf.currentTerm)
 	select {
 	case <-rf.getCallChannel:
 		rf.followerCaseGetState()
@@ -24,7 +23,6 @@ func (rf *Raft) followerRoutine() {
 	default:
 		rf.checkApply()
 	}
-	rf.logger.Printf("follower routine end\n\n")
 }
 
 func (rf *Raft) followerCaseGetState() {
@@ -50,8 +48,8 @@ func (rf *Raft) followerCaseElection() {
 			newRequest := &RequestVoteArgs{
 				CandidateId:  rf.me,
 				Term:         rf.currentTerm,
-				lastLogIndex: len(rf.log) - 1,
-				lastLogTerm:  rf.log[len(rf.log)-1].term,
+				LastLogIndex: len(rf.log) - 1,
+				LastLogTerm:  rf.log[len(rf.log)-1].Term,
 			}
 			go rf.voteRequestRoutine(serverId, newRequest)
 		}
@@ -66,16 +64,31 @@ func (rf *Raft) followerCaseReceiveRequest(args *RequestVoteArgs) {
 	requestTerm := args.Term
 	reply := &RequestVoteReply{}
 	if requestTerm > rf.currentTerm {
-		rf.logger.Printf("term outdated given new request, updating to %d \n", requestTerm)
+		rf.logger.Printf("Term outdated given new request, updating to %d \n", requestTerm)
 		rf.currentTerm = requestTerm
 		rf.votedFor = -1
 		rf.resetElectionTimer()
 	}
-	if requestTerm == rf.currentTerm && rf.votedFor == -1 {
-		rf.logger.Println("voted")
-		rf.votedFor = requestCandidate
-		reply.VoteGranted = true
-		rf.resetElectionTimer()
+
+	if requestTerm < rf.currentTerm {
+		rf.logger.Printf("request outdated, discarding \n")
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		rf.resultRequestsChannel <- reply
+		return
+	}
+
+	if rf.votedFor == -1 {
+
+		if rf.checkRequestValid(args) {
+			rf.logger.Println("voted")
+			rf.votedFor = requestCandidate
+			reply.VoteGranted = true
+			rf.resetElectionTimer()
+		} else {
+			rf.logger.Println("request not valid")
+			reply.VoteGranted = false
+		}
 	} else {
 		rf.logger.Println("discarding vote")
 		reply.VoteGranted = false
@@ -85,38 +98,14 @@ func (rf *Raft) followerCaseReceiveRequest(args *RequestVoteArgs) {
 }
 
 func (rf *Raft) followerCaseReceiveAppend(args *AppendEntriesArgs) {
+	//rf.logger.Printf("processing append, Term %d, leader %d, previdx %d, prevterm %d, entry len %d\n",
+	//	args.Term, args.LeaderId, args.PrevLogIndex, args.PrevLogTerm, len(args.Entries))
 	appendTerm := args.Term
-	reply := &AppendEntriesReply{}
 	if appendTerm > rf.currentTerm {
-		rf.logger.Printf("term outdated given new append, updating to %d \n", appendTerm)
+		rf.logger.Printf("Term outdated given new append, updating to %d \n", appendTerm)
 		rf.currentTerm = appendTerm
 	}
-	if appendTerm < rf.currentTerm || len(rf.log) <= args.prevLogIndex || rf.log[args.prevLogIndex].term != args.prevLogTerm {
-		rf.logger.Println("discarding append")
-		reply.Success = false
-		reply.Term = rf.currentTerm
-		rf.resultAppendChannel <- reply
-		return
-	}
-	// get rid of all entries beyond prevLogIndex and append new entries
-	rf.log = rf.log[:args.prevLogIndex+1]
-	for entry := range args.entries {
-		newLog := &logInfo{
-			command: entry,
-			term:    rf.currentTerm,
-		}
-		rf.log = append(rf.log, newLog)
-	}
-	// update commit index
-	if args.leaderCommit > rf.commitIndex {
-		if len(rf.log)-1 < args.leaderCommit {
-			rf.commitIndex = len(rf.log) - 1
-		} else {
-			rf.commitIndex = args.leaderCommit
-		}
-	}
-	// reset timer
-	rf.resetElectionTimer()
+	rf.resultAppendChannel <- rf.processAppend(args)
 }
 
 func (rf *Raft) followerCaseFeedbackAppend(feedback *appendFeedback) {
@@ -140,7 +129,7 @@ func (rf *Raft) voteRequestRoutine(serverId int, newRequest *RequestVoteArgs) {
 	newReply := &RequestVoteReply{}
 	ok := rf.sendRequestVote(serverId, newRequest, newReply)
 	if ok {
-		rf.logger.Printf("vote from %d, term %d, grated %t\n", serverId, newRequest.Term, newReply.VoteGranted)
+		rf.logger.Printf("vote from %d, Term %d, grated %t\n", serverId, newRequest.Term, newReply.VoteGranted)
 		rf.requestFeedbackChannel <- newReply
 	}
 
